@@ -11,8 +11,49 @@ from pyrogram.errors import FloodWait
 from vars import CREDIT, cookies_file_path, AUTH_USERS
 import globals
 
+# ================================================================
+# 🧩 PARSER – .txt को Groups (Topic + URLs) में बाँटता है
+# ================================================================
+def parse_txt_to_groups(content):
+    """
+    Parses the content of a .txt file.
+    Returns a list of dict: [{"topic": "Name", "urls": ["url1", "url2"]}]
+    """
+    lines = content.strip().split("\n")
+    groups = []
+    current_topic = "YouTube Playlist"
+    current_urls = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:  # blank line → group break
+            if current_urls:
+                groups.append({"topic": current_topic, "urls": current_urls.copy()})
+                current_urls = []
+            continue
+
+        if line.startswith("#"):
+            if current_urls:
+                groups.append({"topic": current_topic, "urls": current_urls.copy()})
+                current_urls = []
+            current_topic = line.lstrip("# ").strip()
+        elif "://" in line and ("youtube.com" in line or "youtu.be" in line):
+            current_urls.append(line)
+
+    if current_urls:
+        groups.append({"topic": current_topic, "urls": current_urls.copy()})
+
+    if not groups and current_urls:
+        groups.append({"topic": "YouTube Playlist", "urls": current_urls})
+
+    return groups
+
+# ================================================================
+# YOUTUBE HANDLER – Auto Topic Thread
+# ================================================================
 def register_youtube_handlers(bot):
-# ==============================================================================================================================
+
+    # ===== /cookies (unchanged) =====
     @bot.on_message(filters.command("cookies") & filters.private)
     async def cookies_handler(client: Client, m: Message):
         editable = await m.reply_text("**Please upload the YouTube Cookies file (.txt format).**")
@@ -31,179 +72,207 @@ def register_youtube_handlers(bot):
             await m.reply_text("✅ Cookies updated successfully.\n📂 Saved in `youtube_cookies.txt`.")
         except Exception as e:
             await m.reply_text(f"__**Failed Reason**__\n<blockquote>{str(e)}</blockquote>")
-        
-# ==============================================================================================================================
+
+    # ===== /getcookies (unchanged) =====
     @bot.on_message(filters.command("getcookies") & filters.private)
     async def getcookies_handler(client: Client, m: Message):
         try:
             await client.send_document(chat_id=m.chat.id, document=cookies_file_path, caption="Here is the `youtube_cookies.txt` file.")
         except Exception as e:
-            await m.reply_text(f"⚠️ An error occurred: {str(e)}")     
+            await m.reply_text(f"⚠️ An error occurred: {str(e)}")
 
-# ==============================================================================================================================
+    # ===== /ytm (with Auto Topic Thread) =====
     @bot.on_message(filters.command(["ytm"]))
     async def ytm_handler(bot: Client, m: Message):
         globals.processing_request = True
         globals.cancel_requested = False
-        editable = await m.reply_text("**Input Type**\n\n<blockquote><b>01 •Send me the .txt file containing YouTube links\n02 •Send Single link or Set of YouTube multiple links</b></blockquote>")
+
+        editable = await m.reply_text("**Input Type**\n\n<blockquote><b>01 • Send .txt file with YouTube links\n02 • Send Single or multiple YouTube links</b></blockquote>")
         input: Message = await bot.listen(editable.chat.id)
+
+        # ----- CASE 1: .txt file -----
         if input.document and input.document.file_name.endswith(".txt"):
             x = await input.download()
-            file_name, ext = os.path.splitext(os.path.basename(x))
-            playlist_name = file_name.replace('_', ' ')
-            try:
-                with open(x, "r") as f:
-                    content = f.read()
-                content = content.split("\n")
-                links = []
-                for i in content:
-                    links.append(i.split("://", 1))
-                os.remove(x)
-            except:
-                 await m.reply_text("**Invalid file input.**")
-                 os.remove(x)
-                 return
+            with open(x, "r") as f:
+                content = f.read()
+            os.remove(x)
 
-            await editable.edit(f"**•ᴛᴏᴛᴀʟ 🔗 ʟɪɴᴋs ғᴏᴜɴᴅ ᴀʀᴇ --__{len(links)}__--\n•sᴇɴᴅ ғʀᴏᴍ ᴡʜᴇʀᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ...**")
+            # Parse groups
+            groups = parse_txt_to_groups(content)
+            if not groups:
+                await m.reply_text("❌ No valid YouTube links found.")
+                globals.processing_request = False
+                return
+
+            # Ask for Channel/Group ID
+            await editable.edit("**📢 Send Channel/Group ID or /d for current chat**")
             try:
-                input0: Message = await bot.listen(editable.chat.id, timeout=20)
-                raw_text = input0.text
-                await input0.delete(True)
+                input7: Message = await bot.listen(editable.chat.id, timeout=20)
+                raw_text7 = input7.text
+                await input7.delete(True)
             except asyncio.TimeoutError:
-                raw_text = '1'
-        
+                raw_text7 = '/d'
             await editable.delete()
-            arg = int(raw_text)
-            count = int(raw_text)
-            try:
-                if raw_text == "1":
-                    playlist_message = await m.reply_text(f"<blockquote><b>⏯️Playlist : {playlist_name}</b></blockquote>")
-                    await bot.pin_chat_message(m.chat.id, playlist_message.id)
-                    message_id = playlist_message.id
-                    pinning_message_id = message_id + 1
-                    await bot.delete_messages(m.chat.id, pinning_message_id)
-            except Exception as e:
-                pass
-    
+
+            channel_id = m.chat.id if raw_text7 == '/d' else int(raw_text7)
+
+            # Process each group
+            for group in groups:
+                topic_name = group["topic"]
+                urls = group["urls"]
+
+                # Create Topic
+                try:
+                    topic_obj = await bot.create_forum_topic(chat_id=channel_id, name=topic_name)
+                    thread_id = topic_obj.id
+                except Exception as e:
+                    await m.reply_text(f"⚠️ Topic '{topic_name}' not created: {e}\nUsing default thread.")
+                    thread_id = None
+
+                # Batch start
+                await bot.send_message(
+                    chat_id=channel_id,
+                    text=f"🎵 **Playlist:** {topic_name}\n🔄 Total: {len(urls)} songs",
+                    message_thread_id=thread_id
+                )
+
+                count = 1
+                for url_line in urls:
+                    if globals.cancel_requested:
+                        await m.reply_text("⏹️ Stopped.")
+                        globals.processing_request = False
+                        globals.cancel_requested = False
+                        return
+
+                    # Extract URL
+                    if "://" in url_line:
+                        url = url_line.split("://", 1)[1]
+                        url = "https://" + url
+                    else:
+                        url = url_line
+
+                    # Get title from YouTube
+                    try:
+                        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+                        response = requests.get(oembed_url)
+                        audio_title = response.json().get('title', 'YouTube Video')
+                        audio_title = audio_title.replace("_", " ")
+                        name1 = f'{audio_title[:60]} {CREDIT}'
+                        name = f'{audio_title[:60]}'
+                    except:
+                        name1 = f'Song {count}'
+                        name = f'Song {count}'
+
+                    # Download MP3
+                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id)
+                    cmd = f'yt-dlp -x --audio-format mp3 --cookies {cookies_file_path} "{url}" -o "{name}.mp3"'
+                    os.system(cmd)
+
+                    if os.path.exists(f'{name}.mp3'):
+                        await prog.delete()
+                        # Caption
+                        mp3_caption = (
+                            f"Index: {count}\n\n"
+                            f"Title: {name1}.mp3\n\n"
+                            f"Batch: {topic_name}\n\n"
+                            f"Extracted By: {CREDIT}"
+                        )
+                        await bot.send_document(
+                            chat_id=channel_id,
+                            document=f'{name}.mp3',
+                            caption=mp3_caption,
+                            message_thread_id=thread_id
+                        )
+                        os.remove(f'{name}.mp3')
+                    else:
+                        await prog.delete()
+                        await bot.send_message(channel_id, f'❌ Failed: {name1}', message_thread_id=thread_id)
+
+                    count += 1
+
+                # Group completion
+                await bot.send_message(
+                    chat_id=channel_id,
+                    text=f"✅ **{topic_name}** complete!",
+                    message_thread_id=thread_id
+                )
+
+            await m.reply_text("✅ All songs downloaded successfully!")
+
+        # ----- CASE 2: Single or multiple links (no .txt) -----
         elif input.text:
-            content = input.text.strip()
-            content = content.split("\n")
-            links = []
-            for i in content:
-                links.append(i.split("://", 1))
-            count = 1
-            arg = 1
-            playlist_name = "Single or Multiple Links"
+            content = input.text.strip().split("\n")
+            urls = []
+            for line in content:
+                if "://" in line and ("youtube.com" in line or "youtu.be" in line):
+                    urls.append(line)
             await editable.delete()
             await input.delete(True)
-        else:
-            await m.reply_text("**Invalid input. Send either a .txt file or YouTube links set**")
-            return
 
-        try:
-            for i in range(arg-1, len(links)):  # Iterate over each link
+            if not urls:
+                await m.reply_text("❌ No valid YouTube links found.")
+                globals.processing_request = False
+                return
+
+            # Single topic (no # headers)
+            topic_name = "YouTube Links"
+            channel_id = m.chat.id
+            thread_id = None  # send in main chat
+
+            count = 1
+            for url_line in urls:
                 if globals.cancel_requested:
-                    await m.reply_text("🚦**STOPPED**🚦")
+                    await m.reply_text("⏹️ Stopped.")
                     globals.processing_request = False
                     globals.cancel_requested = False
                     return
-                Vxy = links[i][1].replace("www.youtube-nocookie.com/embed", "youtu.be")
-                url = "https://" + Vxy
-                oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-                response = requests.get(oembed_url)
-                audio_title = response.json().get('title', 'YouTube Video')       
-                audio_title = audio_title.replace("_", " ")
-                name = f'{audio_title[:60]} {CREDIT}'        
-                name1 = f'{audio_title} {CREDIT}'
 
-                if "youtube.com" in url or "youtu.be" in url:
-                    prog = await m.reply_text(f"<i><b>Audio Downloading</b></i>\n<blockquote><b>{str(count).zfill(3)}) {name1}</b></blockquote>")
-                    cmd = f'yt-dlp -x --audio-format mp3 --cookies {cookies_file_path} "{url}" -o "{name}.mp3"'
-                    print(f"Running command: {cmd}")
-                    os.system(cmd)
-                    if os.path.exists(f'{name}.mp3'):
-                        await prog.delete(True)
-                        print(f"File {name}.mp3 exists, attempting to send...")
-                        try:
-                            # ============ नया MP3 Caption ============
-                            mp3_caption = (
-                                f"Index: {count}\n\n"
-                                f"Title: {name1}.mp3\n\n"
-                                f"Batch: {playlist_name}\n\n"
-                                f"Extracted By: {CREDIT}"
-                            )
-                            await bot.send_document(
-                                chat_id=m.chat.id,
-                                document=f'{name}.mp3',
-                                caption=mp3_caption
-                            )
-                            os.remove(f'{name}.mp3')
-                            count += 1
-                        except Exception as e:
-                            await m.reply_text(f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n**Url** =>> {url}', disable_web_page_preview=True)
-                            count+=1
-                    else:
-                        await prog.delete(True)
-                        await m.reply_text(f'⚠️**Downloading Failed**⚠️\n**Name** =>> `{str(count).zfill(3)} {name1}`\n**Url** =>> {url}', disable_web_page_preview=True)
-                        count+=1
-                               
-        except Exception as e:
-            await m.reply_text(f"<b>Failed Reason:</b>\n<blockquote><b>{str(e)}</b></blockquote>")
-        finally:
-            await m.reply_text("<blockquote><b>All YouTube Music Download Successfully</b></blockquote>")
- 
-# ==============================================================================================================================
-    @bot.on_message(filters.command(["y2t"]))
-    async def y2t_handler(bot: Client, message: Message):
-        user_id = str(message.from_user.id)
-        editable = await message.reply_text(f"<blockquote><b>Send YouTube Website/Playlist link for convert in .txt file</b></blockquote>")
-        input_message: Message = await bot.listen(message.chat.id)
-        youtube_link = input_message.text.strip()
-        await input_message.delete(True)
-        await editable.delete(True)
-
-        ydl_opts = {
-            'quiet': True,
-            'extract_flat': True,
-            'skip_download': True,
-            'force_generic_extractor': True,
-            'forcejson': True,
-            'cookies': 'youtube_cookies.txt'  # Specify the cookies file
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                result = ydl.extract_info(youtube_link, download=False)
-                if 'entries' in result:
-                    title = result.get('title', 'youtube_playlist')
+                # Extract URL
+                if "://" in url_line:
+                    url = url_line.split("://", 1)[1]
+                    url = "https://" + url
                 else:
-                    title = result.get('title', 'youtube_video')
-            except yt_dlp.utils.DownloadError as e:
-                await message.reply_text(f"<blockquote>{str(e)}</blockquote>")
-                return
-            
-        videos = []
-        if 'entries' in result:
-            for entry in result['entries']:
-                video_title = entry.get('title', 'No title')
-                url = entry['url']
-                videos.append(f"{video_title}: {url}")
+                    url = url_line
+
+                try:
+                    oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+                    response = requests.get(oembed_url)
+                    audio_title = response.json().get('title', 'YouTube Video')
+                    audio_title = audio_title.replace("_", " ")
+                    name1 = f'{audio_title[:60]} {CREDIT}'
+                    name = f'{audio_title[:60]}'
+                except:
+                    name1 = f'Song {count}'
+                    name = f'Song {count}'
+
+                prog = await m.reply_text(f"⏳ Downloading: {name1}")
+                cmd = f'yt-dlp -x --audio-format mp3 --cookies {cookies_file_path} "{url}" -o "{name}.mp3"'
+                os.system(cmd)
+
+                if os.path.exists(f'{name}.mp3'):
+                    await prog.delete()
+                    mp3_caption = (
+                        f"Index: {count}\n\n"
+                        f"Title: {name1}.mp3\n\n"
+                        f"Batch: {topic_name}\n\n"
+                        f"Extracted By: {CREDIT}"
+                    )
+                    await bot.send_document(
+                        chat_id=m.chat.id,
+                        document=f'{name}.mp3',
+                        caption=mp3_caption
+                    )
+                    os.remove(f'{name}.mp3')
+                else:
+                    await prog.delete()
+                    await m.reply_text(f'❌ Failed: {name1}')
+                count += 1
+
+            await m.reply_text("✅ All songs downloaded successfully!")
+
         else:
-            video_title = result.get('title', 'No title')
-            url = result['url']
-            videos.append(f"{video_title}: {url}")
+            await m.reply_text("**Invalid input. Send either a .txt file or YouTube links.**")
+            globals.processing_request = False
+            return
 
-        txt_file = os.path.join("downloads", f'{title}.txt')
-        os.makedirs(os.path.dirname(txt_file), exist_ok=True)  # Ensure the directory exists
-        with open(txt_file, 'w') as f:
-            f.write('\n'.join(videos))
-
-        # ============ नया .txt file caption ============
-        txt_caption = (
-            f"Index: 1\n\n"
-            f"Title: {title}.txt\n\n"
-            f"Batch: {title}\n\n"
-            f"Extracted By: {CREDIT}"
-        )
-        await message.reply_document(document=txt_file, caption=txt_caption)
-        os.remove(txt_file)
+        globals.processing_request = False
