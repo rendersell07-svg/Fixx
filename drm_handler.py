@@ -60,7 +60,7 @@ def parse_txt_to_groups(content):
     return groups
 
 # ================================================================
-# 🚀 DRM HANDLER – Auto Topic Thread वाला संस्करण
+# 🚀 DRM HANDLER – Auto Topic Thread वाला संस्करण (पूरा)
 # ================================================================
 async def drm_handler(bot: Client, m: Message):
     globals.processing_request = True
@@ -82,7 +82,9 @@ async def drm_handler(bot: Client, m: Message):
 
     user_id = m.from_user.id
 
-    # ===== 1. INPUT =====
+    # ============================================================
+    # CASE 1: INPUT IS A .txt FILE
+    # ============================================================
     if m.document and m.document.file_name.endswith('.txt'):
         x = await m.download()
         file_name, ext = os.path.splitext(os.path.basename(x))
@@ -119,7 +121,7 @@ async def drm_handler(bot: Client, m: Message):
             globals.processing_request = False
             return
 
-        # ===== 2. PROCESS EACH GROUP =====
+        # ===== PROCESS EACH GROUP =====
         total_failed = 0
         total_success = 0
 
@@ -227,6 +229,36 @@ async def drm_handler(bot: Client, m: Message):
                             total_failed += 1
                             continue
 
+                    # ---- tencdn.classplusapp / videos.classplusapp / media-cdn.classplusapp.com ----
+                    if "tencdn.classplusapp" in url:
+                        headers = {'host': 'api.classplusapp.com', 'x-access-token': f'{cptoken}', 'accept-language': 'EN', 'api-version': '18', 'app-version': '1.4.73.2', 'build-number': '35', 'connection': 'Keep-Alive', 'content-type': 'application/json', 'device-details': 'Xiaomi_Redmi 7_SDK-32', 'device-id': 'c28d3cb16bbdac01', 'region': 'IN', 'user-agent': 'Mobile-Android', 'webengage-luid': '00000187-6fe4-5d41-a530-26186858be4c', 'accept-encoding': 'gzip'}
+                        params = {"url": f"{url}"}
+                        response = requests.get('https://api.classplusapp.com/cams/uploader/video/jw-signed-url', headers=headers, params=params)
+                        url = response.json()['url']
+
+                    if 'videos.classplusapp' in url:
+                        url = requests.get(f'https://api.classplusapp.com/cams/uploader/video/jw-signed-url?url={url}', headers={'x-access-token': f'{cptoken}'}).json()['url']
+
+                    if 'media-cdn.classplusapp.com' in url or 'media-cdn-alisg.classplusapp.com' in url or 'media-cdn-a.classplusapp.com' in url:
+                        headers = {'host': 'api.classplusapp.com', 'x-access-token': f'{cptoken}', 'accept-language': 'EN', 'api-version': '18', 'app-version': '1.4.73.2', 'build-number': '35', 'connection': 'Keep-Alive', 'content-type': 'application/json', 'device-details': 'Xiaomi_Redmi 7_SDK-32', 'device-id': 'c28d3cb16bbdac01', 'region': 'IN', 'user-agent': 'Mobile-Android', 'webengage-luid': '00000187-6fe4-5d41-a530-26186858be4c', 'accept-encoding': 'gzip'}
+                        params = {"url": f"{url}"}
+                        response = requests.get('https://api.classplusapp.com/cams/uploader/video/jw-signed-url', headers=headers, params=params)
+                        url = response.json()['url']
+
+                    # ---- Brightcove / Careerwill ----
+                    if "edge.api.brightcove.com" in url:
+                        bcov = f'bcov_auth={cwtoken}'
+                        url = url.split("bcov_auth")[0]+bcov
+
+                    # ---- Physics Wallah ----
+                    if "childId" in url and "parentId" in url:
+                        url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={pwtoken}"
+
+                    # ---- APPX encrypted ----
+                    if 'encrypted.m' in url:
+                        appxkey = url.split('*')[1]
+                        url = url.split('*')[0]
+
                     # ---- YouTube ----
                     if "youtu" in url:
                         ytf = f"bv*[height<={raw_text2}][ext=mp4]+ba[ext=m4a]/b[height<=?{raw_text2}]"
@@ -267,8 +299,8 @@ async def drm_handler(bot: Client, m: Message):
                         total_success += 1
                         continue
 
-                    # ---- DRM MPD ----
-                    if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url:
+                    # ---- DRM MPD (with mp4decrypt) ----
+                    if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
                         prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id)
                         path = f"./downloads/{m.chat.id}"
                         res_file = await helper.decrypt_and_merge_video(url, keys_string, path, name, raw_text2)
@@ -290,7 +322,7 @@ async def drm_handler(bot: Client, m: Message):
                         total_success += 1
                         continue
 
-                    # ---- Normal Video ----
+                    # ---- Normal Video (all other) ----
                     prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id)
                     res_file = await helper.download_video(url, cmd, name)
                     await prog.delete()
@@ -310,7 +342,7 @@ async def drm_handler(bot: Client, m: Message):
                 message_thread_id=thread_id
             )
 
-        # ===== 3. FINAL SUMMARY =====
+        # ===== FINAL SUMMARY =====
         await bot.send_message(
             chat_id=channel_id,
             text=f"🏁 **All batches processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}",
@@ -318,9 +350,261 @@ async def drm_handler(bot: Client, m: Message):
         )
         await m.reply_text("✅ All tasks completed successfully!")
 
+    # ============================================================
+    # CASE 2: INPUT IS DIRECT TEXT (single or multiple links)
+    # ============================================================
+    elif m.text and "://" in m.text:
+        # Check premium
+        if m.chat.id not in AUTH_USERS:
+            await bot.send_message(
+                m.chat.id,
+                f"<blockquote>__**Oopss! You are not a Premium member**__\n"
+                f"__**Please Upgrade Your Plan**__\n"
+                f"__**Your User id** __- `{m.chat.id}`</blockquote>"
+            )
+            globals.processing_request = False
+            return
+
+        # Ask for quality
+        editable = await m.reply_text(
+            "━━━━━━━━━━━⚡━━━━━━━━━━━\n"
+            "🎥 **Enter Video Quality**\n"
+            "━━━━━━━━━━━⚡━━━━━━━━━━━\n"
+            "🎮 `144` | `240` | `360` | `480` | `720` | `1080`\n"
+            "✔️ Send /d for default (480p)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        try:
+            input2: Message = await bot.listen(editable.chat.id, timeout=20)
+            raw_text2 = input2.text
+            await input2.delete(True)
+        except asyncio.TimeoutError:
+            raw_text2 = '480'
+        await editable.delete()
+
+        if raw_text2.lower() == '/d':
+            raw_text2 = '480'
+        quality = f"{raw_text2}p"
+        if raw_text2 == "144":
+            res = "256x144"
+        elif raw_text2 == "240":
+            res = "426x240"
+        elif raw_text2 == "360":
+            res = "640x360"
+        elif raw_text2 == "480":
+            res = "854x480"
+        elif raw_text2 == "720":
+            res = "1280x720"
+        elif raw_text2 == "1080":
+            res = "1920x1080"
+        else:
+            res = "UN"
+
+        # Parse links from text (each line)
+        urls = [line.strip() for line in m.text.split("\n") if "://" in line.strip()]
+        if not urls:
+            await m.reply_text("❌ No valid URLs found.")
+            globals.processing_request = False
+            return
+
+        # Since no .txt, we treat all as one group
+        topic_name = "Direct Links"
+        channel_id = m.chat.id
+        thread_id = None  # send in main chat (no topic)
+
+        # Send start message
+        await bot.send_message(
+            chat_id=channel_id,
+            text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links"
+        )
+
+        total_failed = 0
+        total_success = 0
+        count = 1
+        for url_line in urls:
+            if globals.cancel_requested:
+                await m.reply_text("⏹️ Stopped by user.")
+                globals.processing_request = False
+                globals.cancel_requested = False
+                return
+
+            # Parse and title
+            Vxy = url_line.split("://", 1)[1] if "://" in url_line else url_line
+            Vxy = Vxy.replace("file/d/","uc?export=download&id=").replace("www.youtube-nocookie.com/embed", "youtu.be").replace("?modestbranding=1", "").replace("/view?usp=sharing","")
+            url = "https://" + Vxy
+            link0 = "https://" + Vxy
+
+            # For direct links, we don't have title; use filename or "Video"
+            raw_title = f"Video_{count}"
+            name1 = f"Video_{count}"
+            v_name = name1
+            t_name = None
+            display_title = name1
+            name = f'{str(count).zfill(3)}) {name1[:60]}'
+            namef = name1[:60]
+
+            def build_caption(title, ext, idx, batch, topic_text, credit):
+                lines = [f"Index: {idx}", f"Title: {title}.{ext}"]
+                if topic_text:
+                    lines.append(f"Topic: {topic_text}")
+                lines.append(f"Batch: {batch}")
+                lines.append(f"Extracted By: {credit}")
+                return "\n\n".join(lines)
+
+            cc   = build_caption(display_title, "mp4", count, topic_name, t_name, CR)
+            cc1  = build_caption(display_title, "pdf", count, topic_name, t_name, CR)
+            ccimg = build_caption(display_title, "jpg", count, topic_name, t_name, CR)
+            ccm  = build_caption(display_title, "mp3", count, topic_name, t_name, CR)
+
+            try:
+                # ---- Process similarly as above ----
+                # (We can reuse the same logic, but we need to handle all types)
+                # For brevity, we'll just call a function to process each URL
+                # But to avoid duplication, we can define a helper function.
+                # For now, we inline similar code, but we can refactor later.
+                # I'll keep it simple: use the same code as above but without topic creation.
+
+                # --- VisionIAS ---
+                if "visionias" in url:
+                    async with ClientSession() as session:
+                        async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+                            text = await resp.text()
+                            url = re.search(r"(https://.*?playlist.m3u8.*?)\"", text).group(1)
+
+                # --- Classplus DRM ---
+                if "classplusapp.com/drm/" in url or "cpvod.testbook.com" in url:
+                    url = url.replace("https://cpvod.testbook.com/","https://media-cdn.classplusapp.com/drm/")
+                    try:
+                        api_url = f"https://sainibotsdrm.vercel.app/api?url={url}&token={cptoken}&auth=4443683167"
+                        response = requests.get(api_url)
+                        data = response.json()
+                        if data.get("keys") and "url" in data:
+                            mpd = data.get('url')
+                            keys = data.get('keys')
+                            url = mpd
+                            keys_string = " ".join([f"--key {key}" for key in keys])
+                        else:
+                            raise Exception(f"{data.get('error', 'Token expired')}")
+                    except Exception as e:
+                        await bot.send_message(channel_id, f'⚠️ Failed: {name1}\n{url}\nError: {e}')
+                        count += 1
+                        total_failed += 1
+                        continue
+
+                # --- tencdn / videos / media-cdn ---
+                if "tencdn.classplusapp" in url:
+                    headers = {'host': 'api.classplusapp.com', 'x-access-token': f'{cptoken}', 'accept-language': 'EN', 'api-version': '18', 'app-version': '1.4.73.2', 'build-number': '35', 'connection': 'Keep-Alive', 'content-type': 'application/json', 'device-details': 'Xiaomi_Redmi 7_SDK-32', 'device-id': 'c28d3cb16bbdac01', 'region': 'IN', 'user-agent': 'Mobile-Android', 'webengage-luid': '00000187-6fe4-5d41-a530-26186858be4c', 'accept-encoding': 'gzip'}
+                    params = {"url": f"{url}"}
+                    response = requests.get('https://api.classplusapp.com/cams/uploader/video/jw-signed-url', headers=headers, params=params)
+                    url = response.json()['url']
+
+                if 'videos.classplusapp' in url:
+                    url = requests.get(f'https://api.classplusapp.com/cams/uploader/video/jw-signed-url?url={url}', headers={'x-access-token': f'{cptoken}'}).json()['url']
+
+                if 'media-cdn.classplusapp.com' in url or 'media-cdn-alisg.classplusapp.com' in url or 'media-cdn-a.classplusapp.com' in url:
+                    headers = {'host': 'api.classplusapp.com', 'x-access-token': f'{cptoken}', 'accept-language': 'EN', 'api-version': '18', 'app-version': '1.4.73.2', 'build-number': '35', 'connection': 'Keep-Alive', 'content-type': 'application/json', 'device-details': 'Xiaomi_Redmi 7_SDK-32', 'device-id': 'c28d3cb16bbdac01', 'region': 'IN', 'user-agent': 'Mobile-Android', 'webengage-luid': '00000187-6fe4-5d41-a530-26186858be4c', 'accept-encoding': 'gzip'}
+                    params = {"url": f"{url}"}
+                    response = requests.get('https://api.classplusapp.com/cams/uploader/video/jw-signed-url', headers=headers, params=params)
+                    url = response.json()['url']
+
+                # --- Brightcove ---
+                if "edge.api.brightcove.com" in url:
+                    bcov = f'bcov_auth={cwtoken}'
+                    url = url.split("bcov_auth")[0]+bcov
+
+                # --- PW ---
+                if "childId" in url and "parentId" in url:
+                    url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={pwtoken}"
+
+                # --- APPX ---
+                if 'encrypted.m' in url:
+                    appxkey = url.split('*')[1]
+                    url = url.split('*')[0]
+
+                # --- YouTube ---
+                if "youtu" in url:
+                    ytf = f"bv*[height<={raw_text2}][ext=mp4]+ba[ext=m4a]/b[height<=?{raw_text2}]"
+                    cmd = f'yt-dlp --cookies youtube_cookies.txt -f "{ytf}" "{url}" -o "{name}.mp4"'
+                else:
+                    ytf = f"b[height<={raw_text2}]/bv[height<={raw_text2}]+ba/b/bv+ba"
+                    cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
+
+                # --- PDF ---
+                if "pdf" in url:
+                    if "cwmediabkt99" in url:
+                        scraper = cloudscraper.create_scraper()
+                        resp = scraper.get(url)
+                        if resp.status_code == 200:
+                            with open(f'{namef}.pdf', 'wb') as f:
+                                f.write(resp.content)
+                            await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1)
+                            os.remove(f'{namef}.pdf')
+                        else:
+                            raise Exception(f"PDF download failed: {resp.status_code}")
+                    else:
+                        cmd_pdf = f'yt-dlp -o "{namef}.pdf" "{url}" -R 25 --fragment-retries 25'
+                        os.system(cmd_pdf)
+                        await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1)
+                        os.remove(f'{namef}.pdf')
+                    count += 1
+                    total_success += 1
+                    continue
+
+                # --- Image ---
+                if any(ext in url for ext in [".jpg", ".jpeg", ".png"]):
+                    ext = url.split('.')[-1]
+                    cmd_img = f'yt-dlp -o "{namef}.{ext}" "{url}"'
+                    os.system(cmd_img)
+                    await bot.send_photo(channel_id, f'{namef}.{ext}', caption=ccimg)
+                    os.remove(f'{namef}.{ext}')
+                    count += 1
+                    total_success += 1
+                    continue
+
+                # --- DRM MPD ---
+                if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
+                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                    path = f"./downloads/{m.chat.id}"
+                    res_file = await helper.decrypt_and_merge_video(url, keys_string, path, name, raw_text2)
+                    await prog.delete()
+                    await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, None)
+                    count += 1
+                    total_success += 1
+                    continue
+
+                # --- APPX Encrypted ---
+                if 'encrypted.m' in url:
+                    appxkey = url.split('*')[1]
+                    url = url.split('*')[0]
+                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                    res_file = await helper.download_and_decrypt_video(url, cmd, name, appxkey)
+                    await prog.delete()
+                    await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, None)
+                    count += 1
+                    total_success += 1
+                    continue
+
+                # --- Normal Video ---
+                prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                res_file = await helper.download_video(url, cmd, name)
+                await prog.delete()
+                await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, None)
+                count += 1
+                total_success += 1
+
+            except Exception as e:
+                await bot.send_message(channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}')
+                count += 1
+                total_failed += 1
+
+        await bot.send_message(
+            chat_id=channel_id,
+            text=f"🏁 **All links processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}"
+        )
+        await m.reply_text("✅ All tasks completed!")
+
     else:
-        # ----- SINGLE LINK (no .txt) -----
-        await m.reply_text("⚠️ Please send a .txt file with proper format.")
+        await m.reply_text("⚠️ Please send a .txt file or direct links.")
         globals.processing_request = False
         return
 
