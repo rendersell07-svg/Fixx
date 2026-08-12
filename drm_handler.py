@@ -17,23 +17,85 @@ from pyrogram.errors.exceptions.bad_request_400 import StickerEmojiInvalid
 from pyrogram.types.messages_and_media import message
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 
-# 🔹 Raw API for creating forum topics (works with any pyrogram version)
-from pyrogram.raw.functions.messages import CreateForumTopic
-from pyrogram.raw.types import InputPeerChannel
-
 import saini as helper
 import globals
 from utils import progress_bar
 from vars import API_ID, API_HASH, BOT_TOKEN, OWNER, CREDIT, AUTH_USERS, TOTAL_USERS, cookies_file_path
 
 # ================================================================
+# 🔹 TRY TO IMPORT RAW API FOR FORUM TOPICS (if available)
+# ================================================================
+try:
+    from pyrogram.raw.functions.messages import CreateForumTopic
+    from pyrogram.raw.types import InputPeerChannel
+    RAW_TOPIC_AVAILABLE = True
+except ImportError:
+    RAW_TOPIC_AVAILABLE = False
+    print("⚠️ Raw CreateForumTopic not available. Forum topics will be disabled.")
+
+# ================================================================
+# 🧵 SAFE FORUM TOPIC CREATOR (works with or without raw API)
+# ================================================================
+async def create_forum_topic(client: Client, chat_id: int, name: str):
+    """
+    Creates a forum topic using the best available method.
+    Returns thread_id (int) or None if failed.
+    """
+    # 1) Try high-level method (Pyrogram v2+)
+    if hasattr(client, 'create_forum_topic'):
+        try:
+            topic = await client.create_forum_topic(chat_id, name)
+            return topic.id
+        except Exception as e:
+            print(f"High-level create_forum_topic failed: {e}")
+
+    # 2) Try raw API if available
+    if RAW_TOPIC_AVAILABLE:
+        try:
+            peer = await client.resolve_peer(chat_id)
+            request = CreateForumTopic(
+                peer=peer,
+                title=name,
+                icon_color=0
+            )
+            result = await client.invoke(request)
+            # Extract message id (which is the thread id)
+            for update in result.updates:
+                if hasattr(update, 'message') and update.message:
+                    return update.message.id
+            # fallback: try to get from result.messages?
+            if hasattr(result, 'messages') and result.messages:
+                return result.messages[0].id
+        except Exception as e:
+            print(f"Raw CreateForumTopic failed: {e}")
+
+    # 3) If all fail, return None
+    print(f"❌ Could not create forum topic '{name}'. Falling back to default thread.")
+    return None
+
+# ================================================================
+# 🛠️ HELPER TO CONDITIONALLY PASS message_thread_id (for older pyrogram)
+# ================================================================
+def _get_send_kwargs(thread_id):
+    """Returns kwargs for send_* methods only if thread_id is not None and pyrogram version supports it."""
+    kwargs = {}
+    if thread_id is not None:
+        try:
+            import pyrogram
+            # Check if version is at least 2.0.0 (which supports message_thread_id)
+            if hasattr(pyrogram, "__version__"):
+                ver = pyrogram.__version__
+                if ver and ver >= "2.0.0":
+                    kwargs["message_thread_id"] = thread_id
+            # If version check fails, we assume it's old and omit the param
+        except:
+            pass
+    return kwargs
+
+# ================================================================
 # 🧩 PARSER – .txt को Groups (Topic + URLs) में बाँटता है
 # ================================================================
 def parse_txt_to_groups(content):
-    """
-    Parses the content of a .txt file.
-    Returns a list of dict: [{"topic": "Name", "urls": ["url1", "url2"]}]
-    """
     lines = content.strip().split("\n")
     groups = []
     current_topic = "General Batch"
@@ -41,7 +103,7 @@ def parse_txt_to_groups(content):
 
     for line in lines:
         line = line.strip()
-        if not line:  # blank line → group break
+        if not line:
             if current_urls:
                 groups.append({"topic": current_topic, "urls": current_urls.copy()})
                 current_urls = []
@@ -64,53 +126,7 @@ def parse_txt_to_groups(content):
     return groups
 
 # ================================================================
-# 🧵 FORUM TOPIC CREATOR – Works with any pyrogram version
-# ================================================================
-async def create_forum_topic(client: Client, chat_id: int, name: str):
-    """
-    Creates a forum topic in a supergroup.
-    Returns thread_id (int) or None if failed.
-    """
-    try:
-        # 1) Try high-level method (Pyrogram v2+)
-        if hasattr(client, 'create_forum_topic'):
-            topic = await client.create_forum_topic(chat_id, name)
-            return topic.id
-
-        # 2) Fallback to raw API (works with v1 and v2)
-        # Resolve peer
-        peer = await client.resolve_peer(chat_id)
-        # Prepare request
-        request = CreateForumTopic(
-            peer=peer,
-            title=name,
-            icon_color=0  # default color
-        )
-        # Invoke
-        result = await client.invoke(request)
-        # The result is an Updates object. We need to find the created topic ID.
-        # Usually the topic ID is in the updates.chats or updates.messages.
-        # We can extract it from the message that is created (it has a reply_to_message with thread_id)
-        # Or we can parse the updates to find the thread_id.
-        # Simpler: we can get the message_id of the topic creation message and use that as thread_id? No.
-        # Actually, in Pyrogram, the topic ID is the message_id of the first message in that topic.
-        # So we can get the first message's id.
-        # Let's find the message from updates:
-        for update in result.updates:
-            if hasattr(update, 'message') and update.message:
-                # The topic id is the message's id (since it's the first message in that topic)
-                # But we need to ensure it's the correct one.
-                # We can also check if the message has a reply_to_message with forum_topic=True
-                # But to keep it safe, we can just use the message id.
-                return update.message.id
-        # If we didn't find, return None
-        return None
-    except Exception as e:
-        print(f"⚠️ Failed to create forum topic '{name}': {e}")
-        return None
-
-# ================================================================
-# 🚀 DRM HANDLER – Auto Topic Thread (with raw API fallback)
+# 🚀 DRM HANDLER – Auto Topic Thread (with safe fallback)
 # ================================================================
 async def drm_handler(bot: Client, m: Message):
     globals.processing_request = True
@@ -179,17 +195,17 @@ async def drm_handler(bot: Client, m: Message):
             topic_name = group["topic"]
             urls = group["urls"]
 
-            # --- Create Topic (Thread) using robust function ---
+            # --- Create Topic (Thread) using safe function ---
             thread_id = await create_forum_topic(bot, channel_id, topic_name)
             if thread_id is None:
                 await m.reply_text(f"⚠️ Topic '{topic_name}' not created.\nFalling back to default thread.")
-                # thread_id remains None
+                # thread_id stays None
 
             # --- Send Batch Start ---
             await bot.send_message(
                 chat_id=channel_id,
                 text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links",
-                message_thread_id=thread_id if thread_id else None
+                **_get_send_kwargs(thread_id)
             )
 
             # --- Process URLs in this group ---
@@ -270,7 +286,7 @@ async def drm_handler(bot: Client, m: Message):
                             else:
                                 raise Exception(f"{data.get('error', 'Token expired')}")
                         except Exception as e:
-                            await bot.send_message(channel_id, f'⚠️ Failed: {name1}\n{url}\nError: {e}', message_thread_id=thread_id if thread_id else None)
+                            await bot.send_message(channel_id, f'⚠️ Failed: {name1}\n{url}\nError: {e}', **_get_send_kwargs(thread_id))
                             count += 1
                             total_failed += 1
                             continue
@@ -321,14 +337,14 @@ async def drm_handler(bot: Client, m: Message):
                             if resp.status_code == 200:
                                 with open(f'{namef}.pdf', 'wb') as f:
                                     f.write(resp.content)
-                                await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, message_thread_id=thread_id if thread_id else None)
+                                await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, **_get_send_kwargs(thread_id))
                                 os.remove(f'{namef}.pdf')
                             else:
                                 raise Exception(f"PDF download failed: {resp.status_code}")
                         else:
                             cmd_pdf = f'yt-dlp -o "{namef}.pdf" "{url}" -R 25 --fragment-retries 25'
                             os.system(cmd_pdf)
-                            await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, message_thread_id=thread_id if thread_id else None)
+                            await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, **_get_send_kwargs(thread_id))
                             os.remove(f'{namef}.pdf')
                         count += 1
                         total_success += 1
@@ -339,7 +355,7 @@ async def drm_handler(bot: Client, m: Message):
                         ext = url.split('.')[-1]
                         cmd_img = f'yt-dlp -o "{namef}.{ext}" "{url}"'
                         os.system(cmd_img)
-                        await bot.send_photo(channel_id, f'{namef}.{ext}', caption=ccimg, message_thread_id=thread_id if thread_id else None)
+                        await bot.send_photo(channel_id, f'{namef}.{ext}', caption=ccimg, **_get_send_kwargs(thread_id))
                         os.remove(f'{namef}.{ext}')
                         count += 1
                         total_success += 1
@@ -347,11 +363,11 @@ async def drm_handler(bot: Client, m: Message):
 
                     # ---- DRM MPD ----
                     if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
-                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id if thread_id else None)
+                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                         path = f"./downloads/{m.chat.id}"
                         res_file = await helper.decrypt_and_merge_video(url, keys_string, path, name, raw_text2)
                         await prog.delete()
-                        await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id if thread_id else None)
+                        await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id)
                         count += 1
                         total_success += 1
                         continue
@@ -360,24 +376,24 @@ async def drm_handler(bot: Client, m: Message):
                     if 'encrypted.m' in url:
                         appxkey = url.split('*')[1]
                         url = url.split('*')[0]
-                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id if thread_id else None)
+                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                         res_file = await helper.download_and_decrypt_video(url, cmd, name, appxkey)
                         await prog.delete()
-                        await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id if thread_id else None)
+                        await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id)
                         count += 1
                         total_success += 1
                         continue
 
                     # ---- Normal Video ----
-                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", message_thread_id=thread_id if thread_id else None)
+                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                     res_file = await helper.download_video(url, cmd, name)
                     await prog.delete()
-                    await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id if thread_id else None)
+                    await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id)
                     count += 1
                     total_success += 1
 
                 except Exception as e:
-                    await bot.send_message(channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}', message_thread_id=thread_id if thread_id else None)
+                    await bot.send_message(channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}', **_get_send_kwargs(thread_id))
                     count += 1
                     total_failed += 1
 
@@ -385,14 +401,14 @@ async def drm_handler(bot: Client, m: Message):
             await bot.send_message(
                 chat_id=channel_id,
                 text=f"✅ **{topic_name}** complete!",
-                message_thread_id=thread_id if thread_id else None
+                **_get_send_kwargs(thread_id)
             )
 
         # ===== FINAL SUMMARY =====
         await bot.send_message(
             chat_id=channel_id,
             text=f"🏁 **All batches processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}",
-            message_thread_id=None
+            **_get_send_kwargs(None)  # no thread_id
         )
         await m.reply_text("✅ All tasks completed successfully!")
 
@@ -456,7 +472,7 @@ async def drm_handler(bot: Client, m: Message):
         # Since no .txt, we treat all as one group
         topic_name = "Direct Links"
         channel_id = m.chat.id
-        thread_id = None  # send in main chat (no topic)
+        thread_id = None  # no topic
 
         # Send start message
         await bot.send_message(
@@ -502,14 +518,13 @@ async def drm_handler(bot: Client, m: Message):
             ccm  = build_caption(display_title, "mp3", count, topic_name, t_name, CR)
 
             try:
-                # ---- VisionIAS ----
+                # ---- Same processing as above (without thread_id) ----
                 if "visionias" in url:
                     async with ClientSession() as session:
                         async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
                             text = await resp.text()
                             url = re.search(r"(https://.*?playlist.m3u8.*?)\"", text).group(1)
 
-                # ---- Classplus DRM ----
                 if "classplusapp.com/drm/" in url or "cpvod.testbook.com" in url:
                     url = url.replace("https://cpvod.testbook.com/","https://media-cdn.classplusapp.com/drm/")
                     try:
@@ -529,7 +544,6 @@ async def drm_handler(bot: Client, m: Message):
                         total_failed += 1
                         continue
 
-                # ---- tencdn / videos / media-cdn ----
                 if "tencdn.classplusapp" in url:
                     headers = {'host': 'api.classplusapp.com', 'x-access-token': f'{cptoken}', 'accept-language': 'EN', 'api-version': '18', 'app-version': '1.4.73.2', 'build-number': '35', 'connection': 'Keep-Alive', 'content-type': 'application/json', 'device-details': 'Xiaomi_Redmi 7_SDK-32', 'device-id': 'c28d3cb16bbdac01', 'region': 'IN', 'user-agent': 'Mobile-Android', 'webengage-luid': '00000187-6fe4-5d41-a530-26186858be4c', 'accept-encoding': 'gzip'}
                     params = {"url": f"{url}"}
@@ -545,21 +559,17 @@ async def drm_handler(bot: Client, m: Message):
                     response = requests.get('https://api.classplusapp.com/cams/uploader/video/jw-signed-url', headers=headers, params=params)
                     url = response.json()['url']
 
-                # ---- Brightcove ----
                 if "edge.api.brightcove.com" in url:
                     bcov = f'bcov_auth={cwtoken}'
                     url = url.split("bcov_auth")[0]+bcov
 
-                # ---- PW ----
                 if "childId" in url and "parentId" in url:
                     url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={pwtoken}"
 
-                # ---- APPX ----
                 if 'encrypted.m' in url:
                     appxkey = url.split('*')[1]
                     url = url.split('*')[0]
 
-                # ---- YouTube ----
                 if "youtu" in url:
                     ytf = f"bv*[height<={raw_text2}][ext=mp4]+ba[ext=m4a]/b[height<=?{raw_text2}]"
                     cmd = f'yt-dlp --cookies youtube_cookies.txt -f "{ytf}" "{url}" -o "{name}.mp4"'
@@ -567,7 +577,6 @@ async def drm_handler(bot: Client, m: Message):
                     ytf = f"b[height<={raw_text2}]/bv[height<={raw_text2}]+ba/b/bv+ba"
                     cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
 
-                # ---- PDF ----
                 if "pdf" in url:
                     if "cwmediabkt99" in url:
                         scraper = cloudscraper.create_scraper()
@@ -588,7 +597,6 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
                     continue
 
-                # ---- Image ----
                 if any(ext in url for ext in [".jpg", ".jpeg", ".png"]):
                     ext = url.split('.')[-1]
                     cmd_img = f'yt-dlp -o "{namef}.{ext}" "{url}"'
@@ -599,7 +607,6 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
                     continue
 
-                # ---- DRM MPD ----
                 if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
                     prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
                     path = f"./downloads/{m.chat.id}"
@@ -610,7 +617,6 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
                     continue
 
-                # ---- APPX Encrypted ----
                 if 'encrypted.m' in url:
                     appxkey = url.split('*')[1]
                     url = url.split('*')[0]
@@ -622,7 +628,6 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
                     continue
 
-                # ---- Normal Video ----
                 prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
                 res_file = await helper.download_video(url, cmd, name)
                 await prog.delete()
