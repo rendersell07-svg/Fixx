@@ -20,8 +20,9 @@ from pathlib import Path
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from base64 import b64decode
-from vars import CREDIT   # <--- यह लाइन जोड़ी गई है
+from vars import CREDIT
 
+# ========== UTILITY FUNCTIONS ==========
 def duration(filename):
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                              "format=duration", "-of",
@@ -35,7 +36,6 @@ def exec(cmd):
         output = process.stdout.decode()
         print(output)
         return output
-        #err = process.stdout.decode()
 
 def pull_run(work, cmds):
     with concurrent.futures.ThreadPoolExecutor(max_workers=work) as executor:
@@ -52,7 +52,6 @@ async def aio(url,name):
                 await f.close()
     return k
 
-
 async def download(url,name):
     ka = f'{name}.pdf'
     async with aiohttp.ClientSession() as session:
@@ -62,7 +61,6 @@ async def download(url,name):
                 await f.write(await resp.read())
                 await f.close()
     return ka
-
 
 def parse_vid_info(info):
     info = info.strip()
@@ -99,17 +97,10 @@ def vid_info(info):
             try:
                 if "RESOLUTION" not in i[2] and i[2] not in temp and "audio" not in i[2]:
                     temp.append(i[2])
-                    
-                    # temp.update(f'{i[2]}')
-                    # new_info.append((i[2], i[0]))
-                    #  mp4,mkv etc ==== f"({i[1]})" 
-                    
                     new_info.update({f'{i[2]}':f'{i[0]}'})
-
             except:
                 pass
     return new_info
-
 
 async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
     try:
@@ -185,8 +176,6 @@ async def run(cmd):
     if stderr:
         return f'[stderr]\n{stderr.decode()}'
 
-    
-
 def old_download(url, file_name, chunk_size = 1024 * 10):
     if os.path.exists(file_name):
         os.remove(file_name)
@@ -197,7 +186,6 @@ def old_download(url, file_name, chunk_size = 1024 * 10):
                 fd.write(chunk)
     return file_name
 
-
 def human_readable_size(size, decimal_places=2):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
         if size < 1024.0 or unit == 'PB':
@@ -205,14 +193,13 @@ def human_readable_size(size, decimal_places=2):
         size /= 1024.0
     return f"{size:.{decimal_places}f} {unit}"
 
-
 def time_name():
     date = datetime.date.today()
     now = datetime.datetime.now()
     current_time = now.strftime("%H%M%S")
     return f"{date} {current_time}.mp4"
 
-
+failed_counter = 0
 async def download_video(url,cmd, name):
     download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
     global failed_counter
@@ -241,18 +228,6 @@ async def download_video(url,cmd, name):
     except FileNotFoundError as exc:
         return os.path.isfile.splitext[0] + "." + "mp4"
 
-
-async def send_doc(bot: Client, m: Message, cc, ka, cc1, prog, count, name, channel_id):
-    reply = await bot.send_message(channel_id, f"Downloading pdf:\n<pre><code>{name}</code></pre>")
-    time.sleep(1)
-    start_time = time.time()
-    await bot.send_document(ka, caption=cc1)
-    count+=1
-    await reply.delete (True)
-    time.sleep(1)
-    os.remove(ka)
-    time.sleep(3) 
-
 def decrypt_file(file_path, key):  
     if not os.path.exists(file_path): 
         return False  
@@ -276,10 +251,28 @@ async def download_and_decrypt_video(url, cmd, name, key):
             print(f"Failed to decrypt {video_path}.")  
             return None  
 
-async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, name, prog, channel_id):
+# ========== SEND FUNCTIONS WITH THREAD_ID SUPPORT ==========
+
+async def send_doc(bot: Client, m: Message, cc, ka, cc1, prog, count, name, channel_id, thread_id=None):
+    reply = await bot.send_message(channel_id, f"Downloading pdf:\n<pre><code>{name}</code></pre>", message_thread_id=thread_id)
+    time.sleep(1)
+    start_time = time.time()
+    await bot.send_document(
+        chat_id=channel_id,
+        document=ka,
+        caption=cc1,
+        message_thread_id=thread_id    # ⬅️ Thread ID
+    )
+    count += 1
+    await reply.delete(True)
+    time.sleep(1)
+    os.remove(ka)
+    time.sleep(3)
+
+async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, name, prog, channel_id, thread_id=None):
     subprocess.run(f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 "{filename}.jpg"', shell=True)
-    await prog.delete (True)
-    reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{CREDIT}**</blockquote>")
+    await prog.delete(True)
+    reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{CREDIT}**</blockquote>", message_thread_id=thread_id)
     reply = await m.reply_text(f"**Generate Thumbnail:**\n<blockquote>**{name}**</blockquote>")
     try:
         if thumb == "/d":
@@ -304,9 +297,28 @@ async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, n
     start_time = time.time()
 
     try:
-        await bot.send_video(channel_id, w_filename, caption=cc, supports_streaming=True, height=720, width=1280, thumb=thumbnail, duration=dur, progress=progress_bar, progress_args=(reply, start_time))
+        await bot.send_video(
+            channel_id,
+            w_filename,
+            caption=cc,
+            supports_streaming=True,
+            height=720,
+            width=1280,
+            thumb=thumbnail,
+            duration=dur,
+            progress=progress_bar,
+            progress_args=(reply, start_time),
+            message_thread_id=thread_id    # ⬅️ Thread ID
+        )
     except Exception:
-        await bot.send_document(channel_id, w_filename, caption=cc, progress=progress_bar, progress_args=(reply, start_time))
+        await bot.send_document(
+            channel_id,
+            w_filename,
+            caption=cc,
+            progress=progress_bar,
+            progress_args=(reply, start_time),
+            message_thread_id=thread_id    # ⬅️ Thread ID
+        )
     os.remove(w_filename)
     await reply.delete(True)
     await reply1.delete(True)
