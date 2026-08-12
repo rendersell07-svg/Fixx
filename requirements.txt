@@ -1,4 +1,4 @@
-# Core Telegram & extensions
+# Core Telegram & extensions (Pyrogram v2+ required for Forum Topics)
 pyrogram>=2.0.0
 pyromod
 tgcrypto
