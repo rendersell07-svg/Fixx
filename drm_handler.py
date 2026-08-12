@@ -31,74 +31,82 @@ try:
     RAW_TOPIC_AVAILABLE = True
 except ImportError:
     RAW_TOPIC_AVAILABLE = False
-    print("⚠️ Raw CreateForumTopic not available. Forum topics will be disabled.")
 
 # ================================================================
-# 🧵 SAFE FORUM TOPIC CREATOR (works with or without raw API)
+# 🧵 DIAGNOSTIC FORUM TOPIC CREATOR (shows exact reason)
 # ================================================================
 async def create_forum_topic(client: Client, chat_id: int, name: str):
     """
-    Creates a forum topic using the best available method.
-    Returns thread_id (int) or None if failed.
+    Creates a forum topic with detailed error logging and user feedback.
+    Returns thread_id or None.
     """
-    # 1) Try high-level method (Pyrogram v2+)
+    try:
+        chat = await client.get_chat(chat_id)
+        if not chat.is_supergroup:
+            error_msg = f"❌ Chat {chat_id} is NOT a supergroup. Topics require a supergroup."
+            print(error_msg)
+            await client.send_message(chat_id, f"⚠️ **Topic Creation Failed:**\n{error_msg}\n\nPlease upgrade your group to supergroup.")
+            return None
+        print(f"✅ Chat {chat_id} is a supergroup.")
+    except Exception as e:
+        print(f"❌ Error fetching chat: {e}")
+        return None
+
+    # 1) Try high-level method
     if hasattr(client, 'create_forum_topic'):
         try:
             topic = await client.create_forum_topic(chat_id, name)
+            print(f"✅ Topic '{name}' created with id {topic.id}")
             return topic.id
         except Exception as e:
-            print(f"High-level create_forum_topic failed: {e}")
+            print(f"❌ High-level create_forum_topic failed: {e}")
+            await client.send_message(chat_id, f"⚠️ **High-level error:**\n{e}")
 
     # 2) Try raw API if available
     if RAW_TOPIC_AVAILABLE:
         try:
             peer = await client.resolve_peer(chat_id)
-            request = CreateForumTopic(
-                peer=peer,
-                title=name,
-                icon_color=0
-            )
+            request = CreateForumTopic(peer=peer, title=name, icon_color=0)
             result = await client.invoke(request)
-            # Extract message id (which is the thread id)
             for update in result.updates:
                 if hasattr(update, 'message') and update.message:
-                    return update.message.id
-            # fallback: try to get from result.messages?
+                    topic_id = update.message.id
+                    print(f"✅ Topic '{name}' created via raw API with id {topic_id}")
+                    return topic_id
             if hasattr(result, 'messages') and result.messages:
-                return result.messages[0].id
+                topic_id = result.messages[0].id
+                print(f"✅ Topic '{name}' created via raw API with id {topic_id}")
+                return topic_id
         except Exception as e:
-            print(f"Raw CreateForumTopic failed: {e}")
+            print(f"❌ Raw CreateForumTopic failed: {e}")
+            await client.send_message(chat_id, f"⚠️ **Raw API error:**\n{e}")
 
-    # 3) If all fail, return None
+    # If all fail
     print(f"❌ Could not create forum topic '{name}'. Falling back to default thread.")
+    await client.send_message(chat_id, f"ℹ️ **Topic '{name}' not created.**\n\nPossible reasons:\n- Topics not enabled in this supergroup\n- Bot lacks 'Create Topics' permission\n- Group is not a supergroup\n- Telegram API error\n\nFalling back to default chat.")
     return None
 
 # ================================================================
-# 🛠️ HELPER TO CONDITIONALLY PASS message_thread_id (for older pyrogram)
+# 🛠️ CONDITIONAL message_thread_id (for older pyrogram)
 # ================================================================
 def _get_send_kwargs(thread_id):
-    """Returns kwargs for send_* methods only if thread_id is not None and pyrogram version supports it."""
     kwargs = {}
     if thread_id is not None:
         try:
             import pyrogram
-            # Check if version is at least 2.0.0 (which supports message_thread_id)
-            if hasattr(pyrogram, "__version__"):
-                ver = pyrogram.__version__
-                if ver and ver >= "2.0.0":
-                    kwargs["message_thread_id"] = thread_id
-            # If version check fails, we assume it's old and omit the param
+            if hasattr(pyrogram, "__version__") and pyrogram.__version__ >= "2.0.0":
+                kwargs["message_thread_id"] = thread_id
         except:
             pass
     return kwargs
 
 # ================================================================
-# 🧩 PARSER – .txt को Groups (Topic + URLs) में बाँटता है
+# 🧩 PARSER – .txt को Groups में बाँटता है (with default topic)
 # ================================================================
-def parse_txt_to_groups(content):
+def parse_txt_to_groups(content, default_topic="General Batch"):
     lines = content.strip().split("\n")
     groups = []
-    current_topic = "General Batch"
+    current_topic = default_topic
     current_urls = []
 
     for line in lines:
@@ -121,12 +129,12 @@ def parse_txt_to_groups(content):
         groups.append({"topic": current_topic, "urls": current_urls.copy()})
 
     if not groups and current_urls:
-        groups.append({"topic": "General Batch", "urls": current_urls})
+        groups.append({"topic": default_topic, "urls": current_urls})
 
     return groups
 
 # ================================================================
-# 🚀 DRM HANDLER – Auto Topic Thread (with safe fallback)
+# 🚀 DRM HANDLER – Complete
 # ================================================================
 async def drm_handler(bot: Client, m: Message):
     globals.processing_request = True
@@ -146,10 +154,8 @@ async def drm_handler(bot: Client, m: Message):
     res = globals.res
     topic = globals.topic
 
-    user_id = m.from_user.id
-
     # ============================================================
-    # CASE 1: INPUT IS A .txt FILE
+    # CASE 1: .txt FILE
     # ============================================================
     if m.document and m.document.file_name.endswith('.txt'):
         x = await m.download()
@@ -180,35 +186,32 @@ async def drm_handler(bot: Client, m: Message):
         await editable.delete()
         channel_id = m.chat.id if raw_text7 == '/d' else int(raw_text7)
 
-        # Parse groups
-        groups = parse_txt_to_groups(content)
+        # 🟢 Parse groups – default topic = file name
+        default_topic = file_name.replace('_', ' ')
+        groups = parse_txt_to_groups(content, default_topic=default_topic)
+
         if not groups:
             await m.reply_text("❌ No valid URLs found.")
             globals.processing_request = False
             return
 
-        # ===== PROCESS EACH GROUP =====
         total_failed = 0
         total_success = 0
 
-        for group_idx, group in enumerate(groups):
+        for group in groups:
             topic_name = group["topic"]
             urls = group["urls"]
 
-            # --- Create Topic (Thread) using safe function ---
+            # Try to create topic (diagnostic)
             thread_id = await create_forum_topic(bot, channel_id, topic_name)
-            if thread_id is None:
-                await m.reply_text(f"⚠️ Topic '{topic_name}' not created.\nFalling back to default thread.")
-                # thread_id stays None
 
-            # --- Send Batch Start ---
+            # Send batch start
             await bot.send_message(
                 chat_id=channel_id,
                 text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links",
                 **_get_send_kwargs(thread_id)
             )
 
-            # --- Process URLs in this group ---
             count = 1
             for url_line in urls:
                 if globals.cancel_requested:
@@ -312,7 +315,7 @@ async def drm_handler(bot: Client, m: Message):
                         bcov = f'bcov_auth={cwtoken}'
                         url = url.split("bcov_auth")[0]+bcov
 
-                    # ---- PW ----
+                    # ---- Physics Wallah ----
                     if "childId" in url and "parentId" in url:
                         url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={pwtoken}"
 
@@ -408,7 +411,7 @@ async def drm_handler(bot: Client, m: Message):
         await bot.send_message(
             chat_id=channel_id,
             text=f"🏁 **All batches processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}",
-            **_get_send_kwargs(None)  # no thread_id
+            **_get_send_kwargs(None)
         )
         await m.reply_text("✅ All tasks completed successfully!")
 
@@ -469,12 +472,10 @@ async def drm_handler(bot: Client, m: Message):
             globals.processing_request = False
             return
 
-        # Since no .txt, we treat all as one group
         topic_name = "Direct Links"
         channel_id = m.chat.id
-        thread_id = None  # no topic
+        thread_id = None
 
-        # Send start message
         await bot.send_message(
             chat_id=channel_id,
             text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links"
@@ -490,7 +491,6 @@ async def drm_handler(bot: Client, m: Message):
                 globals.cancel_requested = False
                 return
 
-            # Parse and title
             Vxy = url_line.split("://", 1)[1] if "://" in url_line else url_line
             Vxy = Vxy.replace("file/d/","uc?export=download&id=").replace("www.youtube-nocookie.com/embed", "youtu.be").replace("?modestbranding=1", "").replace("/view?usp=sharing","")
             url = "https://" + Vxy
@@ -518,7 +518,7 @@ async def drm_handler(bot: Client, m: Message):
             ccm  = build_caption(display_title, "mp3", count, topic_name, t_name, CR)
 
             try:
-                # ---- Same processing as above (without thread_id) ----
+                # ---- Same processing as above without thread_id ----
                 if "visionias" in url:
                     async with ClientSession() as session:
                         async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
