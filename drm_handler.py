@@ -33,14 +33,13 @@ except ImportError:
     RAW_TOPIC_AVAILABLE = False
 
 # ================================================================
-# 🧵 DIAGNOSTIC FORUM TOPIC CREATOR
+# 🧵 SILENT FORUM TOPIC CREATOR (with diagnostics)
 # ================================================================
 async def create_forum_topic(client: Client, chat_id: int, name: str):
     try:
         chat = await client.get_chat(chat_id)
         if not chat.is_supergroup:
             print(f"❌ Chat {chat_id} is NOT a supergroup.")
-            await client.send_message(chat_id, "⚠️ **Topics require a supergroup.**\nPlease upgrade your group to supergroup.")
             return None
         print(f"✅ Chat {chat_id} is a supergroup.")
     except Exception as e:
@@ -54,7 +53,6 @@ async def create_forum_topic(client: Client, chat_id: int, name: str):
             return topic.id
         except Exception as e:
             print(f"❌ High-level create_forum_topic failed: {e}")
-            await client.send_message(chat_id, f"⚠️ **High-level error:**\n{e}")
 
     if RAW_TOPIC_AVAILABLE:
         try:
@@ -72,14 +70,12 @@ async def create_forum_topic(client: Client, chat_id: int, name: str):
                 return topic_id
         except Exception as e:
             print(f"❌ Raw CreateForumTopic failed: {e}")
-            await client.send_message(chat_id, f"⚠️ **Raw API error:**\n{e}")
 
     print(f"❌ Could not create forum topic '{name}'. Falling back to default thread.")
-    await client.send_message(chat_id, f"ℹ️ **Topic '{name}' not created.**\n\nFalling back to default chat.")
     return None
 
 # ================================================================
-# 🛠️ CONDITIONAL message_thread_id
+# 🛠️ CONDITIONAL message_thread_id + FloodWait safe sends
 # ================================================================
 def _get_send_kwargs(thread_id):
     kwargs = {}
@@ -126,24 +122,40 @@ def parse_txt_to_groups(content, default_topic="General Batch"):
     return groups
 
 # ================================================================
-# 🔍 VALIDATE CHAT ID
+# 🔍 VALIDATE CHAT ID – robust with fallback
 # ================================================================
-async def get_valid_chat_id(client: Client, chat_id: int, fallback_chat: int):
-    """Validate chat_id, return valid chat_id or None."""
+async def get_valid_chat_id(client: Client, chat_id_input, fallback_chat: int):
+    """
+    Validates the chat_id_input (can be int or string).
+    Returns a valid chat_id or the fallback_chat if invalid.
+    """
+    # If it's /d or None, fallback
+    if chat_id_input in (None, "/d"):
+        return fallback_chat
+
+    # Try to convert to int
+    try:
+        chat_id = int(chat_id_input)
+    except (ValueError, TypeError):
+        # Non-numeric input – fallback
+        await client.send_message(fallback_chat, f"⚠️ Invalid Chat ID format: `{chat_id_input}`. Using current chat.")
+        return fallback_chat
+
+    # Try to get chat info
     try:
         chat = await client.get_chat(chat_id)
         # If we can get chat, it's valid
         return chat_id
     except (ValueError, PeerIdInvalid, KeyError) as e:
         print(f"❌ Invalid chat ID: {chat_id} - {e}")
-        await client.send_message(fallback_chat, f"⚠️ **Invalid Chat ID:** `{chat_id}`\n\nFalling back to current chat.")
+        await client.send_message(fallback_chat, f"⚠️ Invalid Chat ID: `{chat_id}`.\nI'm not a member or the ID is wrong.\n\nFalling back to current chat.")
         return fallback_chat
     except Exception as e:
         print(f"❌ Unexpected error checking chat: {e}")
         return fallback_chat
 
 # ================================================================
-# 🚀 DRM HANDLER – Complete (with chat ID validation)
+# 🚀 DRM HANDLER – Complete (with all fixes)
 # ================================================================
 async def drm_handler(bot: Client, m: Message):
     globals.processing_request = True
@@ -194,18 +206,8 @@ async def drm_handler(bot: Client, m: Message):
             raw_text7 = '/d'
         await editable.delete()
 
-        # 🟢 Determine channel_id
-        if raw_text7 == '/d':
-            channel_id = m.chat.id
-        else:
-            try:
-                channel_id = int(raw_text7)
-            except ValueError:
-                await m.reply_text("❌ Invalid ID format. Using current chat.")
-                channel_id = m.chat.id
-
-        # 🟢 Validate channel_id
-        channel_id = await get_valid_chat_id(bot, channel_id, m.chat.id)
+        # Validate and get channel_id
+        channel_id = await get_valid_chat_id(bot, raw_text7, m.chat.id)
 
         # Parse groups – default topic = file name
         default_topic = file_name.replace('_', ' ')
@@ -361,14 +363,14 @@ async def drm_handler(bot: Client, m: Message):
                             if resp.status_code == 200:
                                 with open(f'{namef}.pdf', 'wb') as f:
                                     f.write(resp.content)
-                                await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, **_get_send_kwargs(thread_id))
+                                await helper.safe_send_document(bot, channel_id, f'{namef}.pdf', cc1, **_get_send_kwargs(thread_id))
                                 os.remove(f'{namef}.pdf')
                             else:
                                 raise Exception(f"PDF download failed: {resp.status_code}")
                         else:
                             cmd_pdf = f'yt-dlp -o "{namef}.pdf" "{url}" -R 25 --fragment-retries 25'
                             os.system(cmd_pdf)
-                            await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1, **_get_send_kwargs(thread_id))
+                            await helper.safe_send_document(bot, channel_id, f'{namef}.pdf', cc1, **_get_send_kwargs(thread_id))
                             os.remove(f'{namef}.pdf')
                         count += 1
                         total_success += 1
@@ -379,7 +381,7 @@ async def drm_handler(bot: Client, m: Message):
                         ext = url.split('.')[-1]
                         cmd_img = f'yt-dlp -o "{namef}.{ext}" "{url}"'
                         os.system(cmd_img)
-                        await bot.send_photo(channel_id, f'{namef}.{ext}', caption=ccimg, **_get_send_kwargs(thread_id))
+                        await helper.safe_send_photo(bot, channel_id, f'{namef}.{ext}', ccimg, **_get_send_kwargs(thread_id))
                         os.remove(f'{namef}.{ext}')
                         count += 1
                         total_success += 1
@@ -387,7 +389,7 @@ async def drm_handler(bot: Client, m: Message):
 
                     # ---- DRM MPD ----
                     if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
-                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
+                        prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                         path = f"./downloads/{m.chat.id}"
                         res_file = await helper.decrypt_and_merge_video(url, keys_string, path, name, raw_text2)
                         await prog.delete()
@@ -400,7 +402,7 @@ async def drm_handler(bot: Client, m: Message):
                     if 'encrypted.m' in url:
                         appxkey = url.split('*')[1]
                         url = url.split('*')[0]
-                        prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
+                        prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                         res_file = await helper.download_and_decrypt_video(url, cmd, name, appxkey)
                         await prog.delete()
                         await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id)
@@ -409,7 +411,7 @@ async def drm_handler(bot: Client, m: Message):
                         continue
 
                     # ---- Normal Video ----
-                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
+                    prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}", **_get_send_kwargs(thread_id))
                     res_file = await helper.download_video(url, cmd, name)
                     await prog.delete()
                     await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, thread_id)
@@ -417,20 +419,22 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
 
                 except Exception as e:
-                    await bot.send_message(channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}', **_get_send_kwargs(thread_id))
+                    await helper.safe_send_message(bot, channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}', **_get_send_kwargs(thread_id))
                     count += 1
                     total_failed += 1
 
             # --- Group Completion ---
-            await bot.send_message(
-                chat_id=channel_id,
+            await helper.safe_send_message(
+                bot,
+                channel_id,
                 text=f"✅ **{topic_name}** complete!",
                 **_get_send_kwargs(thread_id)
             )
 
         # ===== FINAL SUMMARY =====
-        await bot.send_message(
-            chat_id=channel_id,
+        await helper.safe_send_message(
+            bot,
+            channel_id,
             text=f"🏁 **All batches processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}",
             **_get_send_kwargs(None)
         )
@@ -497,8 +501,9 @@ async def drm_handler(bot: Client, m: Message):
         channel_id = m.chat.id
         thread_id = None
 
-        await bot.send_message(
-            chat_id=channel_id,
+        await helper.safe_send_message(
+            bot,
+            channel_id,
             text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links"
         )
 
@@ -560,7 +565,7 @@ async def drm_handler(bot: Client, m: Message):
                         else:
                             raise Exception(f"{data.get('error', 'Token expired')}")
                     except Exception as e:
-                        await bot.send_message(channel_id, f'⚠️ Failed: {name1}\n{url}\nError: {e}')
+                        await helper.safe_send_message(bot, channel_id, f'⚠️ Failed: {name1}\n{url}\nError: {e}')
                         count += 1
                         total_failed += 1
                         continue
@@ -605,14 +610,14 @@ async def drm_handler(bot: Client, m: Message):
                         if resp.status_code == 200:
                             with open(f'{namef}.pdf', 'wb') as f:
                                 f.write(resp.content)
-                            await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1)
+                            await helper.safe_send_document(bot, channel_id, f'{namef}.pdf', cc1)
                             os.remove(f'{namef}.pdf')
                         else:
                             raise Exception(f"PDF download failed: {resp.status_code}")
                     else:
                         cmd_pdf = f'yt-dlp -o "{namef}.pdf" "{url}" -R 25 --fragment-retries 25'
                         os.system(cmd_pdf)
-                        await bot.send_document(channel_id, f'{namef}.pdf', caption=cc1)
+                        await helper.safe_send_document(bot, channel_id, f'{namef}.pdf', cc1)
                         os.remove(f'{namef}.pdf')
                     count += 1
                     total_success += 1
@@ -622,14 +627,14 @@ async def drm_handler(bot: Client, m: Message):
                     ext = url.split('.')[-1]
                     cmd_img = f'yt-dlp -o "{namef}.{ext}" "{url}"'
                     os.system(cmd_img)
-                    await bot.send_photo(channel_id, f'{namef}.{ext}', caption=ccimg)
+                    await helper.safe_send_photo(bot, channel_id, f'{namef}.{ext}', ccimg)
                     os.remove(f'{namef}.{ext}')
                     count += 1
                     total_success += 1
                     continue
 
                 if 'drmcdni' in url or 'drm/wv' in url or 'drm/common' in url or 'mpd' in url:
-                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                    prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}")
                     path = f"./downloads/{m.chat.id}"
                     res_file = await helper.decrypt_and_merge_video(url, keys_string, path, name, raw_text2)
                     await prog.delete()
@@ -641,7 +646,7 @@ async def drm_handler(bot: Client, m: Message):
                 if 'encrypted.m' in url:
                     appxkey = url.split('*')[1]
                     url = url.split('*')[0]
-                    prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                    prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}")
                     res_file = await helper.download_and_decrypt_video(url, cmd, name, appxkey)
                     await prog.delete()
                     await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, None)
@@ -649,7 +654,7 @@ async def drm_handler(bot: Client, m: Message):
                     total_success += 1
                     continue
 
-                prog = await bot.send_message(channel_id, f"⏳ Downloading: {name1}")
+                prog = await helper.safe_send_message(bot, channel_id, f"⏳ Downloading: {name1}")
                 res_file = await helper.download_video(url, cmd, name)
                 await prog.delete()
                 await helper.send_vid(bot, m, cc, res_file, vidwatermark, thumb, name, prog, channel_id, None)
@@ -657,12 +662,13 @@ async def drm_handler(bot: Client, m: Message):
                 total_success += 1
 
             except Exception as e:
-                await bot.send_message(channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}')
+                await helper.safe_send_message(bot, channel_id, f'❌ Failed: {name1}\n{url}\nError: {e}')
                 count += 1
                 total_failed += 1
 
-        await bot.send_message(
-            chat_id=channel_id,
+        await helper.safe_send_message(
+            bot,
+            channel_id,
             text=f"🏁 **All links processed.**\n✅ Success: {total_success}\n❌ Failed: {total_failed}"
         )
         await m.reply_text("✅ All tasks completed!")
