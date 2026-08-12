@@ -33,26 +33,20 @@ except ImportError:
     RAW_TOPIC_AVAILABLE = False
 
 # ================================================================
-# 🧵 DIAGNOSTIC FORUM TOPIC CREATOR (shows exact reason)
+# 🧵 DIAGNOSTIC FORUM TOPIC CREATOR
 # ================================================================
 async def create_forum_topic(client: Client, chat_id: int, name: str):
-    """
-    Creates a forum topic with detailed error logging and user feedback.
-    Returns thread_id or None.
-    """
     try:
         chat = await client.get_chat(chat_id)
         if not chat.is_supergroup:
-            error_msg = f"❌ Chat {chat_id} is NOT a supergroup. Topics require a supergroup."
-            print(error_msg)
-            await client.send_message(chat_id, f"⚠️ **Topic Creation Failed:**\n{error_msg}\n\nPlease upgrade your group to supergroup.")
+            print(f"❌ Chat {chat_id} is NOT a supergroup.")
+            await client.send_message(chat_id, "⚠️ **Topics require a supergroup.**\nPlease upgrade your group to supergroup.")
             return None
         print(f"✅ Chat {chat_id} is a supergroup.")
     except Exception as e:
         print(f"❌ Error fetching chat: {e}")
         return None
 
-    # 1) Try high-level method
     if hasattr(client, 'create_forum_topic'):
         try:
             topic = await client.create_forum_topic(chat_id, name)
@@ -62,7 +56,6 @@ async def create_forum_topic(client: Client, chat_id: int, name: str):
             print(f"❌ High-level create_forum_topic failed: {e}")
             await client.send_message(chat_id, f"⚠️ **High-level error:**\n{e}")
 
-    # 2) Try raw API if available
     if RAW_TOPIC_AVAILABLE:
         try:
             peer = await client.resolve_peer(chat_id)
@@ -81,13 +74,12 @@ async def create_forum_topic(client: Client, chat_id: int, name: str):
             print(f"❌ Raw CreateForumTopic failed: {e}")
             await client.send_message(chat_id, f"⚠️ **Raw API error:**\n{e}")
 
-    # If all fail
     print(f"❌ Could not create forum topic '{name}'. Falling back to default thread.")
-    await client.send_message(chat_id, f"ℹ️ **Topic '{name}' not created.**\n\nPossible reasons:\n- Topics not enabled in this supergroup\n- Bot lacks 'Create Topics' permission\n- Group is not a supergroup\n- Telegram API error\n\nFalling back to default chat.")
+    await client.send_message(chat_id, f"ℹ️ **Topic '{name}' not created.**\n\nFalling back to default chat.")
     return None
 
 # ================================================================
-# 🛠️ CONDITIONAL message_thread_id (for older pyrogram)
+# 🛠️ CONDITIONAL message_thread_id
 # ================================================================
 def _get_send_kwargs(thread_id):
     kwargs = {}
@@ -101,7 +93,7 @@ def _get_send_kwargs(thread_id):
     return kwargs
 
 # ================================================================
-# 🧩 PARSER – .txt को Groups में बाँटता है (with default topic)
+# 🧩 PARSER – .txt को Groups में बाँटता है
 # ================================================================
 def parse_txt_to_groups(content, default_topic="General Batch"):
     lines = content.strip().split("\n")
@@ -134,7 +126,24 @@ def parse_txt_to_groups(content, default_topic="General Batch"):
     return groups
 
 # ================================================================
-# 🚀 DRM HANDLER – Complete
+# 🔍 VALIDATE CHAT ID
+# ================================================================
+async def get_valid_chat_id(client: Client, chat_id: int, fallback_chat: int):
+    """Validate chat_id, return valid chat_id or None."""
+    try:
+        chat = await client.get_chat(chat_id)
+        # If we can get chat, it's valid
+        return chat_id
+    except (ValueError, PeerIdInvalid, KeyError) as e:
+        print(f"❌ Invalid chat ID: {chat_id} - {e}")
+        await client.send_message(fallback_chat, f"⚠️ **Invalid Chat ID:** `{chat_id}`\n\nFalling back to current chat.")
+        return fallback_chat
+    except Exception as e:
+        print(f"❌ Unexpected error checking chat: {e}")
+        return fallback_chat
+
+# ================================================================
+# 🚀 DRM HANDLER – Complete (with chat ID validation)
 # ================================================================
 async def drm_handler(bot: Client, m: Message):
     globals.processing_request = True
@@ -178,15 +187,27 @@ async def drm_handler(bot: Client, m: Message):
         # Ask for Channel/Group ID
         editable = await m.reply_text("**📢 Send Channel/Group ID or /d for current chat**\n\n<blockquote><i>🔹 Make me admin.\n🔸 Send /id in your channel to get ID.\nExample: -100XXXXXXXXXXX</i></blockquote>")
         try:
-            input7: Message = await bot.listen(editable.chat.id, timeout=30)
+            input7: Message = await bot.listen(editable.chat.id, timeout=60)
             raw_text7 = input7.text
             await input7.delete(True)
         except asyncio.TimeoutError:
             raw_text7 = '/d'
         await editable.delete()
-        channel_id = m.chat.id if raw_text7 == '/d' else int(raw_text7)
 
-        # 🟢 Parse groups – default topic = file name
+        # 🟢 Determine channel_id
+        if raw_text7 == '/d':
+            channel_id = m.chat.id
+        else:
+            try:
+                channel_id = int(raw_text7)
+            except ValueError:
+                await m.reply_text("❌ Invalid ID format. Using current chat.")
+                channel_id = m.chat.id
+
+        # 🟢 Validate channel_id
+        channel_id = await get_valid_chat_id(bot, channel_id, m.chat.id)
+
+        # Parse groups – default topic = file name
         default_topic = file_name.replace('_', ' ')
         groups = parse_txt_to_groups(content, default_topic=default_topic)
 
@@ -205,7 +226,7 @@ async def drm_handler(bot: Client, m: Message):
             # Try to create topic (diagnostic)
             thread_id = await create_forum_topic(bot, channel_id, topic_name)
 
-            # Send batch start
+            # Send batch start (with or without thread)
             await bot.send_message(
                 chat_id=channel_id,
                 text=f"📂 **Batch:** {topic_name}\n🔄 Total: {len(urls)} links",
