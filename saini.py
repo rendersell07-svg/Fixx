@@ -1,20 +1,9 @@
-import os
-import re
-import time
-import mmap
-import datetime
-import aiohttp
-import aiofiles
-import asyncio
-import logging
-import requests
-import tgcrypto
-import subprocess
-import concurrent.futures
+import os, re, time, mmap, datetime, aiohttp, aiofiles, asyncio, logging, requests, tgcrypto, subprocess, concurrent.futures
 from math import ceil
 from utils import progress_bar
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait
 from io import BytesIO
 from pathlib import Path  
 from Crypto.Cipher import AES
@@ -22,7 +11,7 @@ from Crypto.Util.Padding import unpad
 from base64 import b64decode
 from vars import CREDIT
 
-# ---------- Utility functions ----------
+# ---------- Utility functions (unchanged) ----------
 def duration(filename):
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                              "format=duration", "-of",
@@ -212,9 +201,45 @@ async def download_and_decrypt_video(url, cmd, name, key):
             return video_path
     return None
 
-# ========== CONDITIONAL THREAD_ID SUPPORT ==========
+# ---------- FloodWait safe send wrappers ----------
+async def safe_send_message(bot, chat_id, text, **kwargs):
+    try:
+        return await bot.send_message(chat_id, text, **kwargs)
+    except FloodWait as e:
+        wait = e.x
+        print(f"FloodWait: waiting {wait} seconds")
+        await asyncio.sleep(wait)
+        return await bot.send_message(chat_id, text, **kwargs)
+
+async def safe_send_document(bot, chat_id, document, caption, **kwargs):
+    try:
+        return await bot.send_document(chat_id, document, caption=caption, **kwargs)
+    except FloodWait as e:
+        wait = e.x
+        print(f"FloodWait: waiting {wait} seconds")
+        await asyncio.sleep(wait)
+        return await bot.send_document(chat_id, document, caption=caption, **kwargs)
+
+async def safe_send_video(bot, chat_id, video, caption, **kwargs):
+    try:
+        return await bot.send_video(chat_id, video, caption=caption, **kwargs)
+    except FloodWait as e:
+        wait = e.x
+        print(f"FloodWait: waiting {wait} seconds")
+        await asyncio.sleep(wait)
+        return await bot.send_video(chat_id, video, caption=caption, **kwargs)
+
+async def safe_send_photo(bot, chat_id, photo, caption, **kwargs):
+    try:
+        return await bot.send_photo(chat_id, photo, caption=caption, **kwargs)
+    except FloodWait as e:
+        wait = e.x
+        print(f"FloodWait: waiting {wait} seconds")
+        await asyncio.sleep(wait)
+        return await bot.send_photo(chat_id, photo, caption=caption, **kwargs)
+
+# ---------- CONDITIONAL thread_id support ----------
 def _get_send_kwargs(thread_id):
-    """Returns kwargs for send_* methods only if thread_id is not None and pyrogram version supports it."""
     kwargs = {}
     if thread_id is not None:
         try:
@@ -225,19 +250,19 @@ def _get_send_kwargs(thread_id):
             pass
     return kwargs
 
-# ========== SEND FUNCTIONS WITH THREAD_ID SUPPORT ==========
+# ---------- SEND FUNCTIONS with FloodWait safe wrappers ----------
 async def send_doc(bot, m, cc, ka, cc1, prog, count, name, channel_id, thread_id=None):
-    reply = await bot.send_message(channel_id, f"Downloading pdf:\n<pre><code>{name}</code></pre>", **_get_send_kwargs(thread_id))
-    await bot.send_document(chat_id=channel_id, document=ka, caption=cc1, **_get_send_kwargs(thread_id))
+    await safe_send_message(bot, channel_id, f"Downloading pdf:\n<pre><code>{name}</code></pre>", **_get_send_kwargs(thread_id))
+    await safe_send_document(bot, channel_id, ka, cc1, **_get_send_kwargs(thread_id))
     count += 1
-    await reply.delete()
+    await prog.delete()
     os.remove(ka)
     time.sleep(3)
 
 async def send_vid(bot, m, cc, filename, vidwatermark, thumb, name, prog, channel_id, thread_id=None):
     subprocess.run(f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 "{filename}.jpg"', shell=True)
     await prog.delete()
-    reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{CREDIT}**</blockquote>", **_get_send_kwargs(thread_id))
+    await safe_send_message(bot, channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{CREDIT}**</blockquote>", **_get_send_kwargs(thread_id))
     reply = await m.reply_text(f"**Generate Thumbnail:**\n<blockquote>**{name}**</blockquote>")
     try:
         if thumb == "/d":
@@ -256,15 +281,15 @@ async def send_vid(bot, m, cc, filename, vidwatermark, thumb, name, prog, channe
     dur = int(duration(w_filename))
     start_time = time.time()
     try:
-        await bot.send_video(channel_id, w_filename, caption=cc, supports_streaming=True,
-                             height=720, width=1280, thumb=thumbnail, duration=dur,
-                             progress=progress_bar, progress_args=(reply, start_time),
-                             **_get_send_kwargs(thread_id))
+        await safe_send_video(bot, channel_id, w_filename, caption=cc,
+                              supports_streaming=True, height=720, width=1280,
+                              thumb=thumbnail, duration=dur,
+                              progress=progress_bar, progress_args=(reply, start_time),
+                              **_get_send_kwargs(thread_id))
     except Exception:
-        await bot.send_document(channel_id, w_filename, caption=cc,
-                                progress=progress_bar, progress_args=(reply, start_time),
-                                **_get_send_kwargs(thread_id))
+        await safe_send_document(bot, channel_id, w_filename, caption=cc,
+                                 progress=progress_bar, progress_args=(reply, start_time),
+                                 **_get_send_kwargs(thread_id))
     os.remove(w_filename)
     await reply.delete()
-    await reply1.delete()
     os.remove(f"{filename}.jpg")
